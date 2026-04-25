@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: ai-code-editor
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: DB_NAME
+        value: ai_code_editor
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: AI_FALLBACK_MODE
+        value: auto
+      - key: MONGO_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
