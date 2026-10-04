@@ -183,7 +183,7 @@ export default function Home() {
       <Navbar />
 
       <main className="workspace-main">
-        <section className="workspace-column workspace-column--main">
+        <section className="workspace-column">
           <section className="hero-card">
             <div>
               <p className="eyebrow">Build faster with context-aware AI</p>
@@ -289,7 +289,7 @@ export default function Home() {
           </section>
         </section>
 
-        <aside className="workspace-column workspace-column--side">
+        <aside className="workspace-column">
           <AIPanel
             result={result}
             loading={loading}

@@ -1,10 +1,37 @@
+from dataclasses import dataclass
 from functools import lru_cache
+from logging import getLogger
 from textwrap import dedent
 
+import httpx
 from fastapi import HTTPException
 from google import genai
+from google.genai import errors
 
-from config import get_settings
+from config import MissingAIKeyError, get_settings
+
+logger = getLogger(__name__)
+
+TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+TRANSIENT_STATUS_NAMES = frozenset(
+    {
+        "RESOURCE_EXHAUSTED",
+        "INTERNAL",
+        "UNAVAILABLE",
+        "DEADLINE_EXCEEDED",
+    }
+)
+
+GENERIC_CLIENT_MESSAGE = "The AI service could not process this request right now."
+CREDENTIALS_CLIENT_MESSAGE = (
+    "The AI service rejected the configured credentials. Check GEMINI_API_KEY."
+)
+
+
+@dataclass(frozen=True)
+class FallbackDecision:
+    use_fallback: bool
+    reason: str = ""
 
 
 @lru_cache
@@ -39,30 +66,67 @@ def build_prompt(action: str, code: str, language: str) -> str:
     ).strip()
 
 
-def should_use_demo_fallback(message: str) -> bool:
+def is_transient_ai_error(exc: BaseException) -> bool:
+    """Report whether an AI failure is worth retrying later.
+
+    Only capacity, server-side, and network faults qualify. Client-side problems
+    such as a bad API key (401/403), an unknown model (404), or a malformed
+    request (400) are configuration or input bugs and must surface as errors
+    instead of being masked by the demo fallback.
+    """
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException, httpx.NetworkError)):
+        return True
+
+    if isinstance(exc, errors.APIError):
+        if exc.code in TRANSIENT_STATUS_CODES:
+            return True
+        return (exc.status or "").upper() in TRANSIENT_STATUS_NAMES
+
+    return False
+
+
+def classify_ai_error(exc: BaseException) -> FallbackDecision:
     settings = get_settings()
     mode = settings.ai_fallback_mode
 
     if mode == "off":
-        return False
-    if mode == "demo":
-        return True
+        return FallbackDecision(False)
 
-    lowered = message.lower()
-    return any(
-        token in lowered
-        for token in (
-            "resource_exhausted",
-            "quota",
-            "429",
-            "not_found",
-            "model",
-            "api key",
-            "timed out",
-            "timeout",
-            "service unavailable",
-        )
-    )
+    if mode == "demo":
+        return FallbackDecision(True, "demo mode is forced on")
+
+    if isinstance(exc, MissingAIKeyError):
+        return FallbackDecision(True, "GEMINI_API_KEY is not configured")
+
+    if not is_transient_ai_error(exc):
+        return FallbackDecision(False)
+
+    if isinstance(exc, errors.APIError):
+        if exc.code == 429 or (exc.status or "").upper() == "RESOURCE_EXHAUSTED":
+            return FallbackDecision(True, "quota exhaustion")
+        return FallbackDecision(True, "temporary provider outage")
+
+    return FallbackDecision(True, "network timeout")
+
+
+def client_message_for(exc: BaseException) -> str:
+    """Log the provider failure in full and return a message safe to expose.
+
+    Raw provider errors can contain key fragments and internal detail, so they
+    stay in the server log instead of travelling back to the browser.
+    """
+    logger.error("Gemini request failed: %s: %s", type(exc).__name__, exc)
+
+    if isinstance(exc, errors.APIError):
+        if exc.code in (401, 403):
+            return CREDENTIALS_CLIENT_MESSAGE
+        if exc.code == 404:
+            return (
+                f"The configured AI model '{get_settings().gemini_model}' is not "
+                "available for this API key."
+            )
+
+    return GENERIC_CLIENT_MESSAGE
 
 
 def comment_for_language(language: str) -> str:
@@ -182,32 +246,16 @@ def generate_ai_response(action_key: str, action: str, code: str, language: str)
             model=settings.gemini_model,
             contents=build_prompt(action, code, language),
         )
-    except RuntimeError as exc:
-        message = str(exc)
-        lowered = message.lower()
-        if should_use_demo_fallback(message):
-            if any(token in lowered for token in ("resource_exhausted", "quota", "429")):
-                reason = "quota exhaustion"
-            elif "missing gemini_api_key" in lowered or "api key" in lowered:
-                reason = "configuration issue"
-            else:
-                reason = "provider issue"
-            return build_demo_response(action_key, code, language, reason)
-        raise HTTPException(status_code=500, detail=message) from exc
+    except MissingAIKeyError as exc:
+        decision = classify_ai_error(exc)
+        if decision.use_fallback:
+            return build_demo_response(action_key, code, language, decision.reason)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        message = str(exc)
-        lowered = message.lower()
-
-        if should_use_demo_fallback(message):
-            reason = "quota exhaustion" if any(
-                token in lowered for token in ("resource_exhausted", "quota", "429")
-            ) else "provider issue"
-            return build_demo_response(action_key, code, language, reason)
-
-        raise HTTPException(
-            status_code=502,
-            detail="The AI service could not process this request right now.",
-        ) from exc
+        decision = classify_ai_error(exc)
+        if decision.use_fallback:
+            return build_demo_response(action_key, code, language, decision.reason)
+        raise HTTPException(status_code=502, detail=client_message_for(exc)) from exc
 
     text = (response.text or "").strip()
     if not text:

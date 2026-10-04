@@ -11,6 +11,10 @@ DEFAULT_CORS_ORIGINS = (
 )
 
 
+class MissingAIKeyError(RuntimeError):
+    """Raised when an AI route runs without GEMINI_API_KEY configured."""
+
+
 class Settings:
     def __init__(self) -> None:
         self.mongo_url = os.getenv("MONGO_URL", "").strip()
@@ -47,7 +51,7 @@ class Settings:
 
     def require_gemini(self) -> None:
         if not self.gemini_api_key:
-            raise RuntimeError(
+            raise MissingAIKeyError(
                 "Missing GEMINI_API_KEY. Add it to backend/.env before using AI routes."
             )
 

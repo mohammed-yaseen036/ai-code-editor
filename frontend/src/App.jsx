@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import './App.css';
 import Home from './pages/Home';
 import Login from './pages/Login';
+import NotFound from './pages/NotFound';
 import Register from './pages/Register';
 
 const hasStoredSession = () => Boolean(localStorage.getItem('token'));
@@ -42,6 +43,7 @@ export default function App() {
             </PrivateRoute>
           )}
         />
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </BrowserRouter>
   );

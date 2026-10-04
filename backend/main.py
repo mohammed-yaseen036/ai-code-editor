@@ -1,10 +1,12 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from config import get_settings
+from database import ensure_indexes
 from routers import auth, code
 
 settings = get_settings()
@@ -12,9 +14,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 FRONTEND_INDEX = FRONTEND_DIST / "index.html"
 
+API_PREFIXES = ("auth", "code")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    ensure_indexes()
+    yield
+
+
 app = FastAPI(
     title="AI Code Editor API",
     description="Authentication, AI code assistance, and session history endpoints.",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -44,6 +56,9 @@ async def health_check():
 if FRONTEND_INDEX.exists():
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_frontend(full_path: str):
+        if full_path.split("/", 1)[0] in API_PREFIXES:
+            raise HTTPException(status_code=404, detail="Not Found")
+
         candidate = FRONTEND_DIST / full_path
 
         if full_path and candidate.is_file():
